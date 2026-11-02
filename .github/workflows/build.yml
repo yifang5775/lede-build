@@ -1,0 +1,93 @@
+name: Build LEDE for ESXi
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/build.yml'
+      - 'configs/x86_64.config'
+permissions:
+  contents: read
+concurrency:
+  group: lede-esxi
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk gcc-multilib g++-multilib gettext genisoimage git gperf help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool llvm libnsl-dev ninja-build p7zip-full patch pkgconf python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip wget xmlto xxd xz-utils zlib1g-dev
+          df -h .
+      - name: Fetch LEDE and feeds
+        run: |
+          git clone --depth 1 https://github.com/coolsnowwolf/lede.git lede
+          cd lede
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+      - name: Configure and verify required packages
+        run: |
+          cp configs/x86_64.config lede/.config
+          cd lede
+          make defconfig
+          for package in luci-app-ssr-plus luci-app-zerotier luci-app-nps npc kmod-vmxnet3; do
+            grep -qx "CONFIG_PACKAGE_${package}=y" .config || { echo "Missing required package: $package"; exit 1; }
+          done
+          grep -qx 'CONFIG_TARGET_x86_64=y' .config
+          grep -qx 'CONFIG_VMDK_IMAGES=y' .config
+          mkdir -p ../build-info
+          cp .config ../build-info/full.config
+          ./scripts/diffconfig.sh > ../build-info/diff.config
+          git rev-parse HEAD > ../build-info/lede-commit.txt
+          for feed in feeds/*; do
+            if [ -d "$feed/.git" ] || [ -f "$feed/.git" ]; then
+              printf '%s ' "$feed" >> ../build-info/feed-commits.txt
+              git -C "$feed" rev-parse HEAD >> ../build-info/feed-commits.txt
+            fi
+          done
+      - name: Download sources
+        working-directory: lede
+        run: |
+          set -o pipefail
+          make download -j8 2>&1 | tee ../download.log
+      - name: Compile firmware
+        working-directory: lede
+        run: |
+          set -o pipefail
+          make -j2 V=s 2>&1 | tee ../build.log
+      - name: Verify firmware
+        run: |
+          test -n "$(find lede/bin/targets/x86/64 -maxdepth 1 -name '*combined*.vmdk' -print -quit)"
+          manifest=$(find lede/bin/targets/x86/64 -maxdepth 1 -name '*.manifest' -print -quit)
+          test -n "$manifest"
+          for package in luci-app-ssr-plus luci-app-zerotier luci-app-nps npc; do
+            grep -q "^${package} " "$manifest" || { echo "Missing from firmware: $package"; exit 1; }
+          done
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: lede-esxi-x86_64-bios
+          path: |
+            lede/bin/targets/x86/64/*combined*.vmdk
+            lede/bin/targets/x86/64/*combined*.img.gz
+            lede/bin/targets/x86/64/*.manifest
+            lede/bin/targets/x86/64/sha256sums
+            build-info/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-diagnostics
+          path: |
+            build.log
+            download.log
+            build-info/
+            lede/logs/
+          if-no-files-found: ignore
+          retention-days: 7
