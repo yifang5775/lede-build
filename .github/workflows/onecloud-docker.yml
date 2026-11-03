@@ -26,6 +26,8 @@ jobs:
           CONFIG_TARGET_amlogic_meson8b=y
           CONFIG_TARGET_amlogic_meson8b_DEVICE_thunder-onecloud=y
           CONFIG_TARGET_ROOTFS_TARGZ=y
+          # CONFIG_TARGET_ROOTFS_EXT4FS is not set
+          # CONFIG_TARGET_ROOTFS_SQUASHFS is not set
           CONFIG_PACKAGE_luci=y
           CONFIG_LUCI_LANG_zh_Hans=y
           CONFIG_PACKAGE_luci-app-ssr-plus=y
@@ -36,6 +38,10 @@ jobs:
           CONFIG_PACKAGE_npc=y
           EOF
           make defconfig
+          if grep -E '^CONFIG_TARGET_ROOTFS_(EXT4FS|SQUASHFS)=y$' .config; then
+            echo "Docker build requires ext4 and SquashFS images to be disabled"
+            exit 1
+          fi
           for setting in TARGET_amlogic_meson8b TARGET_ROOTFS_TARGZ PACKAGE_luci-app-ssr-plus PACKAGE_luci-app-zerotier PACKAGE_luci-app-nps PACKAGE_npc; do
             grep -Fx "CONFIG_$setting=y" .config
           done
