@@ -1,0 +1,67 @@
+name: Build LEDE for OneCloud Docker
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/onecloud-docker.yml'
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk gcc-multilib g++-multilib gettext genisoimage git gperf help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool llvm libnsl-dev ninja-build p7zip-full patch pkgconf python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip wget xmlto xxd xz-utils zlib1g-dev
+      - name: Configure ARM build
+        run: |
+          git clone --depth 1 https://github.com/coolsnowwolf/lede.git
+          cd lede
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          cat > .config <<'EOF'
+          CONFIG_TARGET_amlogic=y
+          CONFIG_TARGET_amlogic_meson8b=y
+          CONFIG_TARGET_amlogic_meson8b_DEVICE_thunder-onecloud=y
+          CONFIG_TARGET_ROOTFS_TARGZ=y
+          CONFIG_PACKAGE_luci=y
+          CONFIG_LUCI_LANG_zh_Hans=y
+          CONFIG_PACKAGE_luci-app-ssr-plus=y
+          CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Xray=y
+          CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ShadowsocksR_Libev_Client=y
+          CONFIG_PACKAGE_luci-app-zerotier=y
+          CONFIG_PACKAGE_luci-app-nps=y
+          CONFIG_PACKAGE_npc=y
+          EOF
+          make defconfig
+          for setting in TARGET_amlogic_meson8b TARGET_ROOTFS_TARGZ PACKAGE_luci-app-ssr-plus PACKAGE_luci-app-zerotier PACKAGE_luci-app-nps PACKAGE_npc; do
+            grep -Fx "CONFIG_$setting=y" .config
+          done
+      - name: Compile
+        working-directory: lede
+        run: |
+          make download -j8
+          make -j2 V=s
+      - name: Package ARM Docker image
+        run: |
+          set -o pipefail
+          mkdir -p dist
+          rootfs=$(find lede/bin/targets/amlogic/meson8b -maxdepth 1 -name '*rootfs.tar.gz' -print -quit)
+          test -n "$rootfs"
+          tar -tzf "$rootfs" > rootfs-files.txt
+          grep -Eq '^([.]/)?sbin/init$' rootfs-files.txt
+          docker import --platform linux/arm/v7 --change 'CMD ["/sbin/init"]' "$rootfs" lede-onecloud:armv7
+          docker save lede-onecloud:armv7 | gzip > dist/lede-onecloud-armv7.docker.tar.gz
+          cp "$rootfs" dist/rootfs.tar.gz
+          cp lede/.config dist/build.config
+          git -C lede rev-parse HEAD > dist/lede-commit.txt
+          cd dist
+          sha256sum *.tar.gz > sha256sums
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lede-onecloud-armv7-docker
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
